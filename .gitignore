@@ -1,0 +1,6 @@
+PyTask/
+__pycache__/
+*.pyc
+*.log
+data/* 
+instance/*
