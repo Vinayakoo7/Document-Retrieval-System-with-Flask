@@ -1,80 +1,84 @@
 import requests
 import time
 from bs4 import BeautifulSoup
-#from app import get_db_connection 
-
-NEWS_WEBSITES = [ {"url": "https://www.nbcnews.com", "selector": ".wide-tease__link"},
-                 {"url": "https://www.indianexpress.com/news", "selector": "h2.title a"} ]
-
 
 def scrape_articles():
-    from app import get_db_connection 
-    print("Entering scrape_articles() function")
-    while True:
-        print("Starting scraping cycle")
-        for website in NEWS_WEBSITES:
-            url = website['url']
-            article_selector = website['selector']
-            print(f"Scraping: {url}") 
+    from app import get_db_connection  # Ensure you have a proper app setup for DB connection
+    url = "https://lite.cnn.com"
+    print(f"Scraping CNN Lite: {url}")
 
+    try:
+        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Debugging: print the fetched HTML to find the correct tags
+        # Uncomment the following line to inspect the HTML structure
+        # print(soup.prettify())
+
+        # Correct selector based on the provided HTML structure
+        article_links = soup.select('li.card--lite a')
+
+        print(f"  - Found {len(article_links)} article links.")
+
+        # Open database connection once for the whole scraping session
+        conn = get_db_connection()
+        if conn is None:
+            print("Database connection error. Exiting.")
+            return
+
+        cursor = conn.cursor()
+
+        for link in article_links:
             try:
-                print("  - Sending request...")
-                response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
-                print("  - Response received.")
-                response.raise_for_status()  
+                # Construct the absolute URL for the article
+                article_url = link['href'] if link['href'].startswith('http') else url + link['href']
+                print(f"    - Fetching article: {article_url}")
 
-                soup = BeautifulSoup(response.content, 'html.parser')
-                article_elements = soup.select(article_selector)  
-                print(f"  - Found {len(article_elements)} article elements.")
+                article_response = requests.get(article_url, headers={'User-Agent': 'Mozilla/5.0'})
+                article_response.raise_for_status()
 
-                for article_element in article_elements:
-                    try:
-                        article_url = article_element['href']
-                        if not article_url.startswith('http'):
-                            article_url = url + article_url  # Construct full URL if relative
-                        print(f"    - Found article: {article_url}")
+                article_soup = BeautifulSoup(article_response.content, 'html.parser')
 
-                        article_response = requests.get(article_url)
-                        article_response.raise_for_status() 
+                # Improved error handling for missing elements
+                title_tag = article_soup.find('h1')
+                if title_tag:
+                    title = title_tag.text.strip()
+                else:
+                    title = "No title found"
 
-                        article_soup = BeautifulSoup(article_response.content, 'html.parser')
+                content_paragraphs = article_soup.select('section.article__content p')
+                if content_paragraphs:
+                    content = "\n".join([p.text.strip() for p in content_paragraphs])
+                else:
+                    content = "No content found"
 
-                        title = article_soup.find('h1').text.strip() 
-                        content_elements = article_soup.select('article p')
-                        content = "\n".join([p.text.strip() for p in content_elements])
+                cursor.execute(
+                    "INSERT INTO documents (url, content) VALUES (%s, %s)",
+                    (article_url, content)
+                )
+                conn.commit()
+                print(f"        - Inserted article: {article_url}")
 
-                        conn = get_db_connection()
-                        if conn is None:
-                            print("      - Database connection error. Skipping article.")
-                            continue  # Skip to the next article
-
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "INSERT INTO documents (url, content) VALUES (%s, %s)",
-                            (article_url, content)
-                        )
-                        conn.commit()
-                        print(f"        - Inserted article: {article_url}")
-
-                    except KeyError as e:
-                        print(f"    - Error extracting article URL: {e}")
-                    except requests.exceptions.RequestException as e:
-                        print(f"    - Error fetching article: {e}")
-                    except mysql.connector.errors.IntegrityError:
-                        print(f"        - Duplicate article skipped: {article_url}")
-                    except Exception as db_error:
-                        print(f"        - Database error: {db_error}")
-                    finally:
-                        if conn:
-                            cursor.close()
-                            conn.close()
-
+            except KeyError:
+                print(f"      - Error: 'href' attribute not found in link: {link}")
             except requests.exceptions.RequestException as e:
-                print(f"  - Scraping error: {e}")
+                print(f"      - Error fetching article: {e}")
+            except Exception as db_error:
+                conn.rollback()
+                print(f"        - Database error: {db_error}")
 
-        print("Sleeping for 1 hour...")
-        time.sleep(3600) 
+        # Close the cursor and connection once after processing all articles
+        cursor.close()
+        conn.close()
 
+    except requests.exceptions.RequestException as e:
+        print(f"  - Error fetching CNN Lite homepage: {e}")
 
+# --- Main Execution Block ---
 if __name__ == "__main__":
-    scrape_articles()
+    while True:
+        scrape_articles()
+        print("Sleeping for 1 hour...")
+        time.sleep(3600)
