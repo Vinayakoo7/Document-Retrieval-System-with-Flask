@@ -12,7 +12,7 @@ This project is a backend system for document retrieval, designed to provide con
 - **Dockerized**: The application is containerized using Docker.
 
 ## Requirements
-- Python 3.x
+- Python 3.12
 - Flask
 - BeautifulSoup
 - Requests
