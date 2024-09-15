@@ -2,3 +2,4 @@ mysql-connector-python
 flask
 beautifulsoup4
 requests
+scikit-learn

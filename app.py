@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 import requests
-import mysql.connector 
+import mysql.connector
 from datetime import datetime, timedelta
 import threading
 import time
@@ -14,57 +14,72 @@ DB_USER = "root"
 DB_PASSWORD = "2812"
 DB_NAME = "document_retrieval"
 
-# Initialize Flask App
+# Flask App
 app = Flask(__name__)
-app.config['JSON_SORT_KEYS'] = False  # Keep JSON responses in the order we add keys
+app.config['JSON_SORT_KEYS'] = False
 
 # Global Variables for Rate Limiting
-RATE_LIMIT_WINDOW = timedelta(minutes=1)  # Time window for rate limiting
-RATE_LIMIT_MAX_REQUESTS = 5  # Max requests allowed in the time window
+RATE_LIMIT_WINDOW = timedelta(minutes=1)
+RATE_LIMIT_MAX_REQUESTS = 5
 
-# Initialize the Ranker (Load your TF-IDF model here)
+# Initialize the Ranker 
 ranker = Ranker()
 
-# Function to get a database connection
+# Database Connection Function
 def get_db_connection():
-    return mysql.connector.connect(
-        host=DB_HOST,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME
-    )
+    try:
+        conn = mysql.connector.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME
+        )
+        return conn
+    except mysql.connector.Error as err:
+        app.logger.error(f"Database connection error: {err}")
+        # Handle the error appropriately (e.g., retry, exit) 
+        return None
 
-# Function to check if a user is rate limited
+# Rate Limiting Function
 def is_rate_limited(user_id):
     conn = get_db_connection()
+    if conn is None:  # Check if connection failed
+        return True  # Assume rate limited on error
+
     cursor = conn.cursor()
     try:
         cursor.execute("SELECT request_count, last_request_time FROM users WHERE user_id = %s", (user_id,))
         user_data = cursor.fetchone()
-        if user_data: 
+        if user_data:
             request_count, last_request_time = user_data
             if datetime.now() - last_request_time < RATE_LIMIT_WINDOW and request_count >= RATE_LIMIT_MAX_REQUESTS:
-                return True  # User is rate limited
+                return True 
             else:
-                cursor.execute("UPDATE users SET request_count = request_count + 1, last_request_time = %s WHERE user_id = %s", (datetime.now(), user_id))
+                cursor.execute(
+                    "UPDATE users SET request_count = request_count + 1, last_request_time = %s WHERE user_id = %s",
+                    (datetime.now(), user_id)
+                )
         else:
-            cursor.execute("INSERT INTO users (user_id, request_count, last_request_time) VALUES (%s, 1, %s)", (user_id, datetime.now()))
+            cursor.execute(
+                "INSERT INTO users (user_id, request_count, last_request_time) VALUES (%s, 1, %s)",
+                (user_id, datetime.now())
+            )
         conn.commit()
-        return False  # User is not rate limited
+        return False 
     except Exception as e:
-        conn.rollback() 
+        conn.rollback()
         app.logger.error(f"Database error during rate limiting: {e}")
-        return True  # Assume rate limited on error
+        return True 
     finally:
         cursor.close()
         conn.close()
 
-# Health check endpoint
+# Health Check Endpoint
 @app.route('/health')
 def health_check():
     return jsonify({"status": "OK"})
 
-# Search endpoint
+# Search Endpoint
 @app.route('/search')
 def search():
     start_time = time.time()
@@ -82,18 +97,18 @@ def search():
     if not query:
         return jsonify({"error": "Missing 'text' parameter in query string"}), 400
 
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify({"error": "Database connection error"}), 500
 
-        # Retrieve potentially relevant documents
+    cursor = conn.cursor()
+    try:
         cursor.execute(
             "SELECT id, content FROM documents WHERE MATCH(content) AGAINST (%s IN NATURAL LANGUAGE MODE)", 
             (query,)
         )
         retrieved_docs = cursor.fetchall()
 
-        # Rank documents using TF-IDF
         results = ranker.rank_documents(query, retrieved_docs, top_k) 
 
         end_time = time.time()
@@ -111,10 +126,8 @@ def search():
         conn.close()
 
 if __name__ == '__main__':
-    # Start the Flask web server
-    app.run(debug=True)  
+    app.run(debug=True) 
 
-    # Start the scraping thread in the background
     scraping_thread = threading.Thread(target=scrape_articles)
-    scraping_thread.daemon = True  # Allow the main thread to exit even if scraping is running
+    scraping_thread.daemon = True 
     scraping_thread.start()

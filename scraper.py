@@ -1,54 +1,80 @@
 import requests
+import time
 from bs4 import BeautifulSoup
-from app import get_db_connection  
+#from app import get_db_connection 
 
-# List of news websites to scrape
-NEWS_WEBSITES = [
-    "https://www.example-news-site-1.com",
-    "https://www.another-news-site-2.com/news"
-]
+NEWS_WEBSITES = [ {"url": "https://www.nbcnews.com", "selector": ".wide-tease__link"},
+                 {"url": "https://www.indianexpress.com/news", "selector": "h2.title a"} ]
+
 
 def scrape_articles():
+    from app import get_db_connection 
+    print("Entering scrape_articles() function")
     while True:
-        for url in NEWS_WEBSITES:
+        print("Starting scraping cycle")
+        for website in NEWS_WEBSITES:
+            url = website['url']
+            article_selector = website['selector']
+            print(f"Scraping: {url}") 
+
             try:
-                # Fetch the webpage
-                response = requests.get(url)
-                response.raise_for_status()  # Raise an error if the request was unsuccessful
+                print("  - Sending request...")
+                response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+                print("  - Response received.")
+                response.raise_for_status()  
 
-                # Parse the webpage content
                 soup = BeautifulSoup(response.content, 'html.parser')
-                articles = soup.find_all('article')  # Find all article elements (adjust as needed)
+                article_elements = soup.select(article_selector)  
+                print(f"  - Found {len(article_elements)} article elements.")
 
-                # Connect to the database
-                conn = get_db_connection() 
-                cursor = conn.cursor()
-
-                for article in articles:
-                    # Extract the title and content from the article
-                    # Adjust these lines based on the actual structure of the website
-                    title = article.find('h2').text.strip()
-                    content = article.find('p').text.strip() 
-
-                    # Insert the article into the database
+                for article_element in article_elements:
                     try:
+                        article_url = article_element['href']
+                        if not article_url.startswith('http'):
+                            article_url = url + article_url  # Construct full URL if relative
+                        print(f"    - Found article: {article_url}")
+
+                        article_response = requests.get(article_url)
+                        article_response.raise_for_status() 
+
+                        article_soup = BeautifulSoup(article_response.content, 'html.parser')
+
+                        title = article_soup.find('h1').text.strip() 
+                        content_elements = article_soup.select('article p')
+                        content = "\n".join([p.text.strip() for p in content_elements])
+
+                        conn = get_db_connection()
+                        if conn is None:
+                            print("      - Database connection error. Skipping article.")
+                            continue  # Skip to the next article
+
+                        cursor = conn.cursor()
                         cursor.execute(
                             "INSERT INTO documents (url, content) VALUES (%s, %s)",
-                            (article_url, content)  # Make sure article_url is defined
+                            (article_url, content)
                         )
                         conn.commit()
-                    except mysql.connector.errors.IntegrityError:  
-                        # If there's a duplicate entry, just skip it
-                        conn.rollback()
-                        pass
+                        print(f"        - Inserted article: {article_url}")
+
+                    except KeyError as e:
+                        print(f"    - Error extracting article URL: {e}")
+                    except requests.exceptions.RequestException as e:
+                        print(f"    - Error fetching article: {e}")
+                    except mysql.connector.errors.IntegrityError:
+                        print(f"        - Duplicate article skipped: {article_url}")
+                    except Exception as db_error:
+                        print(f"        - Database error: {db_error}")
+                    finally:
+                        if conn:
+                            cursor.close()
+                            conn.close()
 
             except requests.exceptions.RequestException as e:
-                # Print an error message if the request fails
-                print(f"Scraping error: {e}")
-            finally:
-                # Close the database connection
-                cursor.close()
-                conn.close()
-        
-        # Wait for an hour before scraping again
-        time.sleep(3600)
+                print(f"  - Scraping error: {e}")
+
+        print("Sleeping for 1 hour...")
+        time.sleep(3600) 
+
+
+if __name__ == "__main__":
+    scrape_articles()

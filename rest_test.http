@@ -1,0 +1,14 @@
+@baseUrl = http://127.0.0.1:5000 
+
+### Health Check
+GET {{baseUrl}}/health
+
+### Search (with user ID header)
+GET {{baseUrl}}/search?text=example
+Content-Type: application/json
+user-id: testuser 
+
+### Search (with parameters)
+GET {{baseUrl}}/search?text=example&top_k=5&threshold=0.7
+Content-Type: application/json
+user-id: testuser
