@@ -1,31 +1,54 @@
+import json
+import os
+import time
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 import requests
 import mysql.connector
-from datetime import datetime, timedelta
-import threading
-import time
-from scraper import scrape_articles  
+from sentence_transformers import SentenceTransformer, util
+from scraper import scrape_articles
 from ranker import Ranker
 
-# Database Configuration
-DB_HOST = "localhost" 
+# Database configuration details
+DB_HOST = "localhost"
 DB_USER = "root"
 DB_PASSWORD = "2812"
 DB_NAME = "document_retrieval"
 
-# Flask App
+# Initialize Flask application
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
-# Global Variables for Rate Limiting
+# Rate limiting settings
 RATE_LIMIT_WINDOW = timedelta(minutes=1)
 RATE_LIMIT_MAX_REQUESTS = 5
 
-# Initialize the Ranker 
+# Initialize the Ranker
 ranker = Ranker()
 
-# Database Connection Function
+# Load the BERT model for sentence embeddings
+bert_model = SentenceTransformer('bert-base-uncased')  
+
+# Caching configuration
+CACHE_FILE = "search_cache.json"
+CACHE_EXPIRY = 3600 
+
+def load_cache():
+    try:
+        with open(CACHE_FILE, 'r') as f:
+            cache_data = json.load(f)
+        return cache_data
+    except FileNotFoundError:
+        return {}  
+
+def save_cache(cache_data):
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(cache_data, f, indent=4)
+
+cache = load_cache() 
+
+# Function to establish a database connection
 def get_db_connection():
     try:
         conn = mysql.connector.connect(
@@ -37,14 +60,13 @@ def get_db_connection():
         return conn
     except mysql.connector.Error as err:
         app.logger.error(f"Database connection error: {err}")
-        # Handle the error appropriately (e.g., retry, exit) 
         return None
 
-# Rate Limiting Function
+# Function to check if a user is rate limited
 def is_rate_limited(user_id):
     conn = get_db_connection()
-    if conn is None:  # Check if connection failed
-        return True  # Assume rate limited on error
+    if conn is None: 
+        return True 
 
     cursor = conn.cursor()
     try:
@@ -74,12 +96,12 @@ def is_rate_limited(user_id):
         cursor.close()
         conn.close()
 
-# Health Check Endpoint
+# Endpoint to check the health of the service
 @app.route('/health')
 def health_check():
     return jsonify({"status": "OK"})
 
-# Search Endpoint
+# Search endpoint with caching and BERT re-ranking
 @app.route('/search')
 def search():
     start_time = time.time()
@@ -92,42 +114,65 @@ def search():
 
     query = request.args.get('text')
     top_k = int(request.args.get('top_k', 10))
-    threshold = float(request.args.get('threshold', 0.5)) 
+    threshold = float(request.args.get('threshold', 0.5))
 
     if not query:
         return jsonify({"error": "Missing 'text' parameter in query string"}), 400
 
-    conn = get_db_connection()
-    if conn is None:
-        return jsonify({"error": "Database connection error"}), 500
+    # Check cache first
+    cache_key = f"{query}_{top_k}_{threshold}"
+    if cache_key in cache and (time.time() - cache[cache_key]['timestamp'] < CACHE_EXPIRY):
+        print("Cache hit!")
+        results = cache[cache_key]['results']
+    else:
+        print("Cache miss.")
+        conn = get_db_connection()
+        if conn is None:
+            return jsonify({"error": "Database connection error"}), 500
 
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "SELECT id, content FROM documents WHERE MATCH(content) AGAINST (%s IN NATURAL LANGUAGE MODE)", 
-            (query,)
-        )
-        retrieved_docs = cursor.fetchall()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT id, content FROM documents WHERE MATCH(content) AGAINST (%s IN NATURAL LANGUAGE MODE)", 
+                (query,)
+            )
+            retrieved_docs = cursor.fetchall()
 
-        results = ranker.rank_documents(query, retrieved_docs, top_k) 
+            results = []
+            # Re-rank documents using BERT
+            query_embedding = bert_model.encode(query, convert_to_tensor=True)
+            document_embeddings = bert_model.encode([doc[1] for doc in retrieved_docs], convert_to_tensor=True)
+            cosine_scores = util.cos_sim(query_embedding, document_embeddings)[0]
 
-        end_time = time.time()
-        inference_time = end_time - start_time
+            # Combine BERT scores with TF-IDF scores
+            for i, doc in enumerate(retrieved_docs):
+                doc_id, doc_content = doc
+                tfidf_score = ranker.rank_documents(query, [(doc_id, doc_content)], top_k=1)[0]['score']
+                combined_score = (tfidf_score + cosine_scores[i].item()) / 2 
+                results.append({"document_id": doc_id, "score": combined_score})
 
-        app.logger.info(f"Search query: {query}, Inference time: {inference_time:.4f} seconds")
+            results = sorted(results, key=lambda x: x['score'], reverse=True)[:top_k] 
 
-        return jsonify(results)
+            # Save results to cache
+            cache[cache_key] = {'results': results, 'timestamp': time.time()}
+            save_cache(cache) 
 
-    except Exception as e:
-        app.logger.error(f"Search error: {e}")
-        return jsonify({"error": "Internal Server Error"}), 500
-    finally:
-        cursor.close()
-        conn.close()
+        except Exception as e:
+            app.logger.error(f"Search error: {e}")
+            return jsonify({"error": "Internal Server Error"}), 500
+        finally:
+            cursor.close()
+            conn.close()
+
+    end_time = time.time()
+    inference_time = end_time - start_time
+    app.logger.info(f"Search query: {query}, Inference time: {inference_time:.4f} seconds")
+
+    return jsonify(results)
 
 if __name__ == '__main__':
     app.run(debug=True) 
 
     scraping_thread = threading.Thread(target=scrape_articles)
-    scraping_thread.daemon = True 
+    scraping_thread.daemon = True
     scraping_thread.start()

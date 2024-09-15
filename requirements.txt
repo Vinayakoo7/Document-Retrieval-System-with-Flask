@@ -3,3 +3,4 @@ flask
 beautifulsoup4
 requests
 scikit-learn
+sentence-transformers
